@@ -60,26 +60,7 @@ class FitMesh:
         for i in range(self.number_of_views):
             target_silhouette.append(silhouette_images[i, ..., 3])
 
-        if self.use_images:
-            """ read other images """
-            images_path = Path(r"/silhouettes_cow").glob("*")
-            image_list = []
-            transform = transforms.Compose([transforms.ToTensor()])
-            for file in images_path:
-                image_path = str(file)
-                image = Image.open(image_path).convert("RGBA")
-                image = image.resize((128, 128))
-
-                image_tensor = transform(image).float() / 255.0
-
-                image_list.append(image_tensor.to(self.device))
-            silhouette_images2 = torch.stack(image_list)
-            silhouette_images2 = silhouette_images2.permute(0, 2, 3, 1)
-            target_silhouette2 = []
-            for i in range(silhouette_images2.shape[0]):
-                target_silhouette2.append(silhouette_images2[i, ..., 3])
-
-        """ continue """
+        # what's the starting shape
         if self.starting_shape == 'sphere':
             # icosphere (icosahedron) with subdivision level
             source_mesh = ico_sphere(4, self.device)
@@ -138,10 +119,70 @@ class FitMesh:
         final_obj = os.path.join('./', 'final_model.obj')
         save_obj(final_obj, final_verts, final_faces)
 
-    def optimize_mesh(self, images, angles):
+    def construct_mesh(self, images_path, angles):
+        verts = self.mesh.verts_packed()
+        center = verts.mean(0)
+        scale = max((verts - center).abs().max(0)[0])
+
         verts_shape = self.optimized_mesh.verts_packed().shape
         deform_verts = torch.full(verts_shape, 0.0, device=self.device, requires_grad=True)
         optimizer = torch.optim.SGD([deform_verts], lr=1.0, momentum=0.9)
+
+        image_list = []
+        transform = transforms.Compose([transforms.ToTensor()])
+        for file in images_path.iterdir():
+            image_path = str(file)
+            image = Image.open(image_path).convert("RGBA")
+            image = image.resize((128, 128))
+
+            image_tensor = transform(image).float() / 255.0
+
+            image_list.append(image_tensor.to(self.device))
+        silhouette_images = torch.stack(image_list)
+        silhouette_images = silhouette_images.permute(0, 2, 3, 1)
+
+        target_silhouette = []
+        for i in range(silhouette_images.shape[0]):
+            target_silhouette.append(silhouette_images[i, ..., 3])
+
+        losses = {
+            "silhouette": {"weight": 1.0, "values": []},
+            "edge": {"weight": 1.0, "values": []},
+            "normal": {"weight": 0.01, "values": []},
+            "laplacian": {"weight": 1.0, "values": []},
+        }
+
+        new_mesh = self.optimized_mesh.offset_verts(deform_verts)
+        loop = tqdm(range(self.iterations))
+        for i in loop:
+            optimizer.zero_grad()
+            new_mesh = self.optimized_mesh.offset_verts(deform_verts)
+
+            loss = {}
+            for k in ["silhouette", "edge", "normal", "laplacian"]:
+                loss[k] = torch.tensor(0.0, device=self.device)
+            update_mesh_shape_prior_losses(new_mesh, loss)
+
+            for j in range(len(image_list)):
+                R, T = look_at_view_transform(dist=2.7, elev=angles[j][0], azim=angles[j][1])
+                cameras = FoVPerspectiveCameras(device=self.device, R=R, T=T)
+                images_predicted = self.renderer(new_mesh, cameras=cameras, lights=lights)
+                predicted_silhouette = images_predicted[..., 3]
+                loss_silhouette = ((predicted_silhouette - target_silhouette[j]) ** 2).mean()
+                loss["silhouette"] += loss_silhouette / len(image_list)
+
+            sum_loss = torch.tensor(0.0, device=self.device)
+            for k in loss:
+                sum_loss += loss[k] * loss[k]
+
+            sum_loss.backward()
+            optimizer.step()
+
+        final_verts, final_faces = new_mesh.get_mesh_verts_faces(0)
+        final_verts = final_verts * scale + center
+
+        final_obj = os.path.join('./', 'new_model.obj')
+        save_obj(final_obj, final_verts, final_faces)
 
 
 # Losses to smooth / regularize the mesh shape
@@ -215,8 +256,12 @@ if __name__ == "__main__":
         shader=SoftSilhouetteShader())
 
     fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device_cpu, num_of_views, 300, 'sphere', False)
-
     fit_mesh.train_on_mesh()
+
+    images = Path("/silhouettes_cow")
+    angles = [(0, -180), (0, -160), (0, -130), (0, -110), (0, -90), (0, -60), (0, -36), (0, -15),
+              (0, 15), (0, 36), (0, 60), (0, 90), (0, 110), (0, 130), (0, 160), (0, 180)]
+    fit_mesh.construct_mesh(images, angles)
 
     end_time = time.perf_counter()
     elapsed = end_time - start_time
