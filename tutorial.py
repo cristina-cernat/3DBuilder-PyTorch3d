@@ -1,3 +1,5 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved. https://github.com/facebookresearch/pytorch3d
+
 import os
 import time
 import torch
