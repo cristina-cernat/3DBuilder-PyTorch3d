@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 class FitMesh:
-    def __init__(self, obj_path, renderer, device, number_of_views, iterations, starting_shape, use_images):
+    def __init__(self, obj_path, renderer, device, number_of_views, iterations, starting_shape):
         self.device = device
 
         self.mesh = load_objs_as_meshes([obj_path], device=self.device)
@@ -30,7 +30,6 @@ class FitMesh:
         self.number_of_views = number_of_views
         self.iterations = iterations
         self.starting_shape = starting_shape
-        self.use_images = use_images
         self.optimized_mesh = Meshes(verts=[], faces=[])
 
     def train_on_mesh(self):
@@ -63,7 +62,7 @@ class FitMesh:
         # what's the starting shape
         if self.starting_shape == 'sphere':
             # icosphere (icosahedron) with subdivision level
-            source_mesh = ico_sphere(4, self.device)
+            source_mesh = ico_sphere(3, self.device)
         elif self.starting_shape == 'cube':
             # cube with subdivision level. cube = better source mesh for buildings
             source_mesh = create_cube(4, self.device)
@@ -124,6 +123,9 @@ class FitMesh:
         center = verts.mean(0)
         scale = max((verts - center).abs().max(0)[0])
 
+        optimized_path = "G:/Git/3DBuilder-PyTorch3d/final_model.obj"
+        if self.optimized_mesh.verts_packed().numel() == 0 and self.optimized_mesh.faces_packed().numel() == 0:
+            self.optimized_mesh = load_objs_as_meshes([optimized_path], device=self.device)
         verts_shape = self.optimized_mesh.verts_packed().shape
         deform_verts = torch.full(verts_shape, 0.0, device=self.device, requires_grad=True)
         optimizer = torch.optim.SGD([deform_verts], lr=1.0, momentum=0.9)
@@ -161,6 +163,7 @@ class FitMesh:
             loss = {}
             for k in ["silhouette", "edge", "normal", "laplacian"]:
                 loss[k] = torch.tensor(0.0, device=self.device)
+
             update_mesh_shape_prior_losses(new_mesh, loss)
 
             for j in range(len(image_list)):
@@ -173,7 +176,7 @@ class FitMesh:
 
             sum_loss = torch.tensor(0.0, device=self.device)
             for k in loss:
-                sum_loss += loss[k] * loss[k]
+                sum_loss += loss[k] * losses[k]["weight"]
 
             sum_loss.backward()
             optimizer.step()
@@ -227,7 +230,7 @@ def create_cube(level, device):
 if __name__ == "__main__":
     start_time = time.perf_counter()
 
-    obj_path_3d = "G:/Projects/3DBuilder-Pytorch/metropolitan_palace.obj"
+    obj_path_3d = "G:/Projects/3DBuilder-Pytorch/cow.obj"
 
     device_cpu = torch.device("cpu")
     device_gpu = torch_directml.device()
@@ -255,13 +258,24 @@ if __name__ == "__main__":
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings_silhouette),
         shader=SoftSilhouetteShader())
 
-    fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device_cpu, num_of_views, 300, 'sphere', False)
-    fit_mesh.train_on_mesh()
+    fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device_cpu, num_of_views, 100, 'sphere')
+    # train model
+    # fit_mesh.train_on_mesh()
 
-    images = Path("/silhouettes_cow")
-    angles = [(0, -180), (0, -160), (0, -130), (0, -110), (0, -90), (0, -60), (0, -36), (0, -15),
-              (0, 15), (0, 36), (0, 60), (0, 90), (0, 110), (0, 130), (0, 160), (0, 180)]
-    fit_mesh.construct_mesh(images, angles)
+    base_dir = Path().resolve()
+    images = base_dir / "silhouettes_cow"
+
+    building_angles = [(0, -180), (0, -160), (0, -130), (0, -110), (0, -90), (0, -60), (0, -36), (0, -15),
+                       (0, 15), (0, 36), (0, 60), (0, 90), (0, 110), (0, 130), (0, 160), (0, 180)]
+
+    cow_angles = [(0.0, -180.0), (18.9474, -161.0526), (37.8947, -142.1053), (56.8421, -123.1579), (75.7895, -104.2105),
+                  (94.7368, -85.2632), (113.6842, -66.3158), (132.6316, -47.3684), (151.5789, -28.4211),
+                  (170.5263, -9.4737), (189.4737, 9.4737), (208.4211, 28.4211), (227.3684, 47.3684),
+                  (246.3158, 66.3158), (265.2632, 85.2632), (284.2105, 104.2105), (303.1579, 123.1579),
+                  (322.1053, 142.1053), (341.0526, 161.0526), (360.0, 180.0)]
+
+    # use model
+    # fit_mesh.construct_mesh(images, cow_angles)
 
     end_time = time.perf_counter()
     elapsed = end_time - start_time
