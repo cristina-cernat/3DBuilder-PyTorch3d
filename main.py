@@ -21,10 +21,6 @@ from pathlib import Path
 
 base_dir = Path().resolve()
 
-class SilhouetteLoss(nn.Module):
-    def forward(self, predicted_silhouette, target_silhouette):
-        return nn.functional.mse_loss(predicted_silhouette, target_silhouette)
-
 
 class FitMesh:
     def __init__(self, obj_path, renderer, device, number_of_views, iterations, starting_shape):
@@ -84,7 +80,7 @@ class FitMesh:
         verts_shape = source_mesh.verts_packed().shape
         deform_verts = torch.full(verts_shape, 0.0, device=self.device, requires_grad=True)
 
-        optimizer = torch.optim.SGD([deform_verts], lr=1.0, momentum=0.9)
+        optimizer = torch.optim.SGD([deform_verts], lr=0.25, momentum=0.9)
         new_src_mesh = source_mesh.offset_verts(deform_verts)
 
         loop = tqdm(range(self.iterations))
@@ -112,7 +108,7 @@ class FitMesh:
                 sum_loss += l * losses[k]["weight"]
                 losses[k]["values"].append(float(l.detach().cpu()))
 
-            loop.set_description(f"total_loss = {sum_loss:.6f}")
+            loop.set_description(f"total_loss_train = {sum_loss:.6f}")
 
             sum_loss.backward()
             optimizer.step()
@@ -133,13 +129,6 @@ class FitMesh:
         optimized_path = base_dir / "final_model.obj"
         if self.optimized_mesh.verts_packed().numel() == 0 and self.optimized_mesh.faces_packed().numel() == 0:
             self.optimized_mesh = load_objs_as_meshes([optimized_path], device=self.device)
-
-        # verts_shape = self.optimized_mesh.verts_packed().shape
-        # deform_verts = torch.full(verts_shape, 0.0, device=self.device, requires_grad=True)
-
-        # optimizer = torch.optim.SGD([deform_verts], lr=1.0, momentum=0.9)
-        fine_tune_optimizer = torch.optim.Adam(self.optimized_mesh.parameters(), lr=0.005)
-        silhouette_loss = SilhouetteLoss()
 
         """ load images """
         image_list = []
@@ -168,63 +157,49 @@ class FitMesh:
             "laplacian": {"weight": 1.0, "values": []},
         }
 
-        fine_tune_iterations = iterations
+        verts_shape = self.optimized_mesh.verts_packed().shape
+        deform_verts = torch.full(verts_shape, 0.0, device=self.device, requires_grad=True)
 
-        # new_mesh = self.optimized_mesh.offset_verts(deform_verts)
-        loop = tqdm(range(fine_tune_iterations))
+        optimizer = torch.optim.SGD([deform_verts], lr=0.12, momentum=0.9)
+        new_src_mesh = self.optimized_mesh.offset_verts(deform_verts)
+
+        loop = tqdm(range(self.iterations))
+
         for i in loop:
-            fine_tune_optimizer.zero_grad()
+            optimizer.zero_grad()
+            new_src_mesh = self.optimized_mesh.offset_verts(deform_verts)
 
-            total_loss = torch.tensor(0.0, device=self.device)
-            for angle, target_silhouette in zip(angles, target_silhouette):
-                R, T = look_at_view_transform(dist=2.7, elev=angle[0], azim=angle[1])
+            loss = {}
+            for k in losses:
+                loss[k] = torch.tensor(0.0, device=self.device)
+
+            update_mesh_shape_prior_losses(new_src_mesh, loss)
+
+            for j in np.random.permutation(len(image_list)).tolist()[:iterations]:
+                # render 2 random images and calculate loss
+                R, T = look_at_view_transform(dist=2.7, elev=angles[j][0], azim=angles[j][1])
                 cameras = FoVPerspectiveCameras(device=self.device, R=R, T=T)
-                images_predicted = self.renderer(self.optimized_mesh, cameras=cameras)
+                images_predicted = self.renderer(new_src_mesh, cameras=cameras, lights=lights)
                 predicted_silhouette = images_predicted[..., 3]
+                loss_silhouette = ((predicted_silhouette - target_silhouette[j]) ** 2).mean()
+                loss["silhouette"] += loss_silhouette / len(image_list)
 
-                loss = silhouette_loss(predicted_silhouette, target_silhouette)
-                total_loss += loss
+            # Weighted sum of the losses
+            sum_loss = torch.tensor(0.0, device=self.device)
+            for k, l in loss.items():
+                sum_loss += l * losses[k]["weight"]
+                losses[k]["values"].append(float(l.detach()))
 
-            total_loss.backward()
-            fine_tune_optimizer.step()
+            loop.set_description(f"total_loss_construct = {sum_loss:.6f}")
 
-            if i % 100 == 0:
-                print(f"iteration: {i}/{fine_tune_iterations}, loss:{total_loss.item()}")
+            sum_loss.backward()
+            optimizer.step()
 
-        # save final obj
-        fine_tuned_mesh = "fine_tuned_mesh.obj"
-        final_verts, final_faces = self.optimized_mesh.get_mesh_verts_faces(0)
+        final_verts, final_faces = new_src_mesh.get_mesh_verts_faces(0)
         final_verts = final_verts * scale + center
-        save_obj(fine_tuned_mesh, final_verts, final_faces)
 
-        #     new_mesh = self.optimized_mesh.offset_verts(deform_verts)
-
-        #     loss = {}
-        #     for k in ["silhouette", "edge", "normal", "laplacian"]:
-        #         loss[k] = torch.tensor(0.0, device=self.device)
-        #
-        #     update_mesh_shape_prior_losses(new_mesh, loss)
-        #
-        #     for j in range(len(image_list)):
-        #         R, T = look_at_view_transform(dist=2.7, elev=angles[j][0], azim=angles[j][1])
-        #         cameras = FoVPerspectiveCameras(device=self.device, R=R, T=T)
-        #         images_predicted = self.renderer(new_mesh, cameras=cameras, lights=lights)
-        #         predicted_silhouette = images_predicted[..., 3]
-        #         loss_silhouette = ((predicted_silhouette - target_silhouette[j]) ** 2).mean()
-        #         loss["silhouette"] += loss_silhouette / len(image_list)
-        #
-        #     sum_loss = torch.tensor(0.0, device=self.device)
-        #     for k in loss:
-        #         sum_loss += loss[k] * losses[k]["weight"]
-        #
-        #     sum_loss.backward()
-        #     optimizer.step()
-        #
-        # final_verts, final_faces = new_mesh.get_mesh_verts_faces(0)
-        # final_verts = final_verts * scale + center
-        #
-        # final_obj = os.path.join('./', 'new_model.obj')
-        # save_obj(final_obj, final_verts, final_faces)
+        final_obj = os.path.join('./', 'new_model.obj')
+        save_obj(final_obj, final_verts, final_faces)
 
 
 # Losses to smooth / regularize the mesh shape
@@ -313,7 +288,7 @@ if __name__ == "__main__":
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings_silhouette),
         shader=SoftSilhouetteShader())
 
-    fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device_cpu, num_of_views, 3000, 'sphere')
+    fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device, num_of_views, 3000, 'sphere')
     # train model
     fit_mesh.train_on_mesh()
 
@@ -329,7 +304,7 @@ if __name__ == "__main__":
                   (322.1053, 142.1053), (341.0526, 161.0526), (360.0, 180.0)]
 
     # use model
-    fit_mesh.construct_mesh(images, building_angles, 3000)
+    fit_mesh.construct_mesh(images, cow_angles, 3000)
 
     end_time = time.perf_counter()
     elapsed = end_time - start_time
