@@ -7,7 +7,7 @@ from PIL import Image, ImageOps
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
-
+from matplotlib import pyplot as plt
 from pytorch3d.utils import ico_sphere
 from pytorch3d.structures.meshes import Meshes
 from pytorch3d.io import IO, save_obj
@@ -20,19 +20,76 @@ from pytorch3d.ops import SubdivideMeshes
 base_dir = Path().resolve()
 
 
+# https://raw.githubusercontent.com/facebookresearch/pytorch3d/main/docs/tutorials/utils/plot_image_grid.py
+def image_grid(images, rows=None, cols=None, fill: bool = True, show_axes: bool = False, rgb: bool = True):
+    """
+    A util function for plotting a grid of images.
+
+    Args:
+        images: (N, H, W, 4) array of RGBA images
+        rows: number of rows in the grid
+        cols: number of columns in the grid
+        fill: boolean indicating if the space between images should be filled
+        show_axes: boolean indicating if the axes of the plots should be visible
+        rgb: boolean, If True, only RGB channels are plotted.
+            If False, only the alpha channel is plotted.
+
+    Returns:
+        None
+    """
+    if (rows is None) != (cols is None):
+        raise ValueError("Specify either both rows and cols or neither.")
+
+    if rows is None:
+        rows = len(images)
+        cols = 1
+
+    gridspec_kw = {"wspace": 0.0, "hspace": 0.0} if fill else {}
+    fig, axarr = plt.subplots(rows, cols, gridspec_kw=gridspec_kw, figsize=(15, 9))
+    bleed = 0
+    fig.subplots_adjust(left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed))
+
+    for ax, im in zip(axarr.ravel(), images):
+        if rgb:
+            # only render RGB channels
+            ax.imshow(im[..., :3])
+        else:
+            # only render Alpha channel
+            ax.imshow(im[..., 3])
+        if not show_axes:
+            ax.set_axis_off()
+
+
+def visualize_prediction(predicted_mesh, target_image, device, title=''):
+    viz_camera = FoVPerspectiveCameras(device=device, R=R[None, 1, ...], T=T[None, 1, ...])
+    viz_renderer = MeshRenderer(
+        rasterizer=MeshRasterizer(cameras=viz_camera, raster_settings=raster_settings_silhouette),
+        shader=SoftSilhouetteShader())
+
+    with torch.no_grad():
+        predicted_images = viz_renderer(predicted_mesh)
+    plt.figure(figsize=(20, 10))
+    plt.subplot(1, 2, 1)
+    plt.imshow(predicted_images[0, ..., 3].cpu().detach().numpy())
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(target_image.cpu().detach().numpy())
+    plt.title(title)
+    plt.axis("off")
+
+
 class FitMesh:
-    def __init__(self, obj_path, renderer, device, number_of_views, iterations, starting_shape):
+    def __init__(self, obj_path, renderer, device, number_of_views, starting_shape):
         self.device = device
 
         self.mesh = load_objs_as_meshes([obj_path], device=self.device)
 
         self.renderer = renderer
         self.number_of_views = number_of_views
-        self.iterations = iterations
         self.starting_shape = starting_shape
         self.optimized_mesh = Meshes(verts=[], faces=[])
 
-    def construct_from_mesh(self):
+    def construct_from_mesh(self, iterations):
         # scale mesh
         verts = self.mesh.verts_packed()
         center = verts.mean(0)
@@ -53,6 +110,9 @@ class FitMesh:
             target_cameras.append(camera)
 
         silhouette_images = self.renderer(mesh_list, cameras=cameras, lights=lights)
+        # visualize using the helper function
+        image_grid(silhouette_images.cpu().numpy(), rows=4, cols=5, rgb=False)
+        plt.show()
 
         # silhouettes_images is a 4D tensor (batch_size, height, width, channels).
         # index 3 is the alpha channel. we extract only the alpha channel
@@ -81,7 +141,7 @@ class FitMesh:
         new_src_mesh = source_mesh.offset_verts(deform_verts)
 
         optimizer = torch.optim.SGD([deform_verts], lr=0.25, momentum=0.9)
-        loop = tqdm(range(self.iterations))
+        loop = tqdm(range(iterations))
 
         for i in loop:
             optimizer.zero_grad()
@@ -107,6 +167,11 @@ class FitMesh:
                 losses[k]["values"].append(float(l.detach()))
 
             loop.set_description(f"total_loss_mesh = {sum_loss:.6f}")
+
+            # visualize every x iterations
+            if i % 200 == 0:
+                visualize_prediction(new_src_mesh, target_image=target_silhouette[1], device=self.device,
+                                     title="iter: %d" % i)
 
             sum_loss.backward()
             optimizer.step()
@@ -154,7 +219,7 @@ class FitMesh:
 
             update_mesh_shape_prior_losses(new_src_mesh, loss)
 
-            for j in np.random.permutation(len(silhouettes)).tolist()[:iterations]:
+            for j in np.random.permutation(len(silhouettes)).tolist()[:2]:
                 # render 2 random images and calculate loss
                 R, T = look_at_view_transform(dist=2.7, elev=angles[j][0], azim=angles[j][1])
                 cameras = FoVPerspectiveCameras(device=self.device, R=R, T=T)
@@ -210,12 +275,12 @@ def update_mesh_shape_prior_losses(mesh, loss):
 
 def pad_to_square(image):
     width, height = image.size
-    max_dim = max(width, height)
+    max_dimensions = max(width, height)
 
-    left = (max_dim - width) // 2
-    right = max_dim - width - left
-    top = (max_dim - height) // 2
-    bottom = max_dim - height - top
+    left = (max_dimensions - width) // 2
+    right = max_dimensions - width - left
+    top = (max_dimensions - height) // 2
+    bottom = max_dimensions - height - top
 
     padding = (left, top, right, bottom)
     padded_image = ImageOps.expand(image, padding, fill=0)
@@ -287,10 +352,10 @@ if __name__ == "__main__":
         shader=SoftSilhouetteShader())
 
     obj_path_3d = base_dir / "metropolitan_palace.obj"
-    fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device, num_of_views, 3000, 'cube')
+    fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device, num_of_views, 'cube')
 
     """ construct from mesh """
-    # fit_mesh.construct_from_mesh()
+    fit_mesh.construct_from_mesh(2000)
 
     """ construct from images """
     images = base_dir / "silhouettes_my_building"
