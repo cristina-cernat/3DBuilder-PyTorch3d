@@ -1,12 +1,18 @@
-# Blender 4.0.1 MTL File: 'cow.blend'
+# Blender 4.0.1 MTL File: 'results.blend'
 # www.blender.org
 
 newmtl initialShadingGroup.001
-Ns 0.000000
-Ka 1.000000 1.000000 1.000000
 Ks 0.000000 0.000000 0.000000
 Ke 0.000000 0.000000 0.000000
 Ni 1.000000
 d 1.000000
 illum 1
-map_Kd G:/Documents/objects/reproduction-of-metropolitan-palace/source/AD-AO.jpg
+Pr 1.000000
+Pm 0.000000
+Ps 0.000000
+Pc 0.000000
+Pcr 0.030000
+aniso 0.000000
+anisor 0.000000
+Tf 1.000000 1.000000 1.000000
+map_Kd metropolitan_palace_texture.png
