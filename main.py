@@ -20,23 +20,7 @@ from pytorch3d.ops import SubdivideMeshes
 base_dir = Path().resolve()
 
 
-# https://raw.githubusercontent.com/facebookresearch/pytorch3d/main/docs/tutorials/utils/plot_image_grid.py
-def image_grid(images, rows=None, cols=None, fill: bool = True, show_axes: bool = False, rgb: bool = True):
-    """
-    A util function for plotting a grid of images.
-
-    Args:
-        images: (N, H, W, 4) array of RGBA images
-        rows: number of rows in the grid
-        cols: number of columns in the grid
-        fill: boolean indicating if the space between images should be filled
-        show_axes: boolean indicating if the axes of the plots should be visible
-        rgb: boolean, If True, only RGB channels are plotted.
-            If False, only the alpha channel is plotted.
-
-    Returns:
-        None
-    """
+def image_grid(images, rows=None, cols=None):
     if (rows is None) != (cols is None):
         raise ValueError("Specify either both rows and cols or neither.")
 
@@ -44,20 +28,14 @@ def image_grid(images, rows=None, cols=None, fill: bool = True, show_axes: bool 
         rows = len(images)
         cols = 1
 
-    gridspec_kw = {"wspace": 0.0, "hspace": 0.0} if fill else {}
+    gridspec_kw = {"wspace": 0.0, "hspace": 0.0}
     fig, axarr = plt.subplots(rows, cols, gridspec_kw=gridspec_kw, figsize=(15, 9))
     bleed = 0
     fig.subplots_adjust(left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed))
 
     for ax, im in zip(axarr.ravel(), images):
-        if rgb:
-            # only render RGB channels
-            ax.imshow(im[..., :3])
-        else:
-            # only render Alpha channel
-            ax.imshow(im[..., 3])
-        if not show_axes:
-            ax.set_axis_off()
+        ax.imshow(im[..., 3])
+        ax.set_axis_off()
 
 
 def visualize_prediction(predicted_mesh, target_image, device, title=''):
@@ -78,7 +56,7 @@ def visualize_prediction(predicted_mesh, target_image, device, title=''):
     plt.axis("off")
 
 
-class FitMesh:
+class ConstructMesh:
     def __init__(self, obj_path, renderer, device, number_of_views, starting_shape):
         self.device = device
 
@@ -90,12 +68,16 @@ class FitMesh:
         self.optimized_mesh = Meshes(verts=[], faces=[])
 
     def construct_from_mesh(self, iterations):
-        # scale mesh
+        """ scale mesh """
+        # get vertices
         verts = self.mesh.verts_packed()
+        # find the center
         center = verts.mean(0)
+        # compute the maximum distance from center to any vertex. this is the scale factor
         scale = max((verts - center).abs().max(0)[0])
+        # recenter the mesh
         self.mesh.offset_verts_(-center)
-        # scale the vertices so that the mesh fits within the cube of side length 1
+        # scale the vertices so that the mesh fits within the cube of side length 0.5
         self.mesh.scale_verts_(0.5 / float(scale))
 
         # duplicate meshes
@@ -109,9 +91,10 @@ class FitMesh:
             camera = FoVPerspectiveCameras(device=self.device, R=R_i, T=T_i)
             target_cameras.append(camera)
 
+        """ render the mesh - silhouettes """
         silhouette_images = self.renderer(mesh_list, cameras=cameras, lights=lights)
         # visualize using the helper function
-        image_grid(silhouette_images.cpu().numpy(), rows=4, cols=5, rgb=False)
+        image_grid(silhouette_images.cpu().numpy(), rows=4, cols=5)
         plt.show()
 
         # silhouettes_images is a 4D tensor (batch_size, height, width, channels).
@@ -128,8 +111,7 @@ class FitMesh:
             # cube with subdivision level. cube = better source mesh for buildings
             source_mesh = create_cube(4, self.device)
 
-        num_views_per_iteration = 2
-
+        """ starting losses """
         losses = {"silhouette": {"weight": 1.0, "values": []},
                   "edge": {"weight": 1.0, "values": []},
                   "normal": {"weight": 0.01, "values": []},
@@ -144,9 +126,11 @@ class FitMesh:
         loop = tqdm(range(iterations))
 
         for i in loop:
+            # reset the optimizer at every step
             optimizer.zero_grad()
             new_src_mesh = source_mesh.offset_verts(deform_verts)
 
+            # break down the prior losses and update the mesh
             loss = {}
             for k in losses:
                 loss[k] = torch.tensor(0.0, device=self.device)
@@ -158,7 +142,7 @@ class FitMesh:
                 images_predicted = self.renderer(new_src_mesh, cameras=target_cameras[j], lights=lights)
                 predicted_silhouette = images_predicted[..., 3]  # 3 = alpha channel
                 loss_silhouette = ((predicted_silhouette - target_silhouette[j]) ** 2).mean()
-                loss["silhouette"] += loss_silhouette / num_views_per_iteration
+                loss["silhouette"] += loss_silhouette / 2
 
             # Weighted sum of the losses
             sum_loss = torch.tensor(0.0, device=self.device)
@@ -169,13 +153,15 @@ class FitMesh:
             loop.set_description(f"total_loss_mesh = {sum_loss:.6f}")
 
             # visualize every x iterations
+            # locally, the images are shown in real time, as they are computed. on colab they are shown at the end
             if i % 200 == 0:
                 visualize_prediction(new_src_mesh, target_image=target_silhouette[1], device=self.device,
                                      title="iter: %d" % i)
-
+            # backward pass
             sum_loss.backward()
             optimizer.step()
 
+        """ save the final model """
         self.optimized_mesh = new_src_mesh
         final_verts, final_faces = new_src_mesh.get_mesh_verts_faces(0)
         final_verts = final_verts * scale + center
@@ -321,21 +307,17 @@ def create_cube(level, device):
 if __name__ == "__main__":
     start_time = time.perf_counter()
 
+    # choose device
     device_cpu = torch.device("cpu")
     device_gpu_cuda = torch.device("cuda:0")
-    # choose device
     device = device_cpu
 
+    """ create the renderer """
     # initialize elevation and azimuth of cameras
     num_of_views = 20
     elevation = torch.linspace(0, 360, num_of_views, device=device)
     azimuth = torch.linspace(-180, 180, num_of_views, device=device)
 
-    # estimated camera angles for the building
-    building_angles = [(0, -180), (0, -160), (0, -130), (0, -110), (0, -90), (0, -60), (0, -36), (0, -15),
-                       (0, 15), (0, 36), (0, 60), (0, 90), (0, 110), (0, 130), (0, 160), (0, 180)]
-
-    cow_angles = list(zip(elevation.tolist(), azimuth.tolist()))
     # create lights
     lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
 
@@ -344,7 +326,7 @@ if __name__ == "__main__":
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
 
     """ silhouette renderer """
-    #  create silhouettes rasterization + renderer
+    #  create silhouettes rasterization + renderer. using a very small number for blur radius > 0 (SoftSilhouetteShader)
     raster_settings_silhouette = RasterizationSettings(image_size=128, blur_radius=np.log(1. / 1e-4 - 1.) * 1e-4,
                                                        faces_per_pixel=50)
     renderer_silhouette = MeshRenderer(
@@ -352,15 +334,20 @@ if __name__ == "__main__":
         shader=SoftSilhouetteShader())
 
     obj_path_3d = base_dir / "metropolitan_palace.obj"
-    fit_mesh = FitMesh(obj_path_3d, renderer_silhouette, device, num_of_views, 'cube')
+    construct_mesh = ConstructMesh(obj_path_3d, renderer_silhouette, device, num_of_views, 'cube')
 
     """ construct from mesh """
-    fit_mesh.construct_from_mesh(2000)
+    construct_mesh.construct_from_mesh(2000)
 
     """ construct from images """
+    # estimated camera angles for the building
+    building_angles = [(0, -180), (0, -160), (0, -130), (0, -110), (0, -90), (0, -60), (0, -36), (0, -15),
+                       (0, 15), (0, 36), (0, 60), (0, 90), (0, 110), (0, 130), (0, 160), (0, 180)]
+
+    # cow_angles = list(zip(elevation.tolist(), azimuth.tolist()))
     images = base_dir / "silhouettes_my_building"
-    silhouettes = fit_mesh.load_images(images)
-    fit_mesh.construct_from_images(silhouettes, building_angles, 100)
+    silhouettes = construct_mesh.load_images(images)
+    construct_mesh.construct_from_images(silhouettes, building_angles, 100)
 
     end_time = time.perf_counter()
     elapsed = end_time - start_time
