@@ -3,12 +3,12 @@ I implemented an algorithm for Unsupervised training on 3D models using PyTorch3
 My main goal is to see how well this algorithm can re-create 3D meshes.
 I chose this method because DNNs (Deep Neural Networks) lack understanding of how the 3D shapes relates to images.
 
-- My motivation came from wanting to re-create 3D buildings from 2D images, as this field is still lacking. Then using these buildings in a Unreal Engine game.
+- My motivation came from wanting to re-create 3D buildings from 2D images, as this field (specifically recognizing buildings) is still lacking. Then I'm using these buildings in an Unreal Engine base game.
 
 
 ## Flow
 It creates a dataset of 2D images by rendering a 3D mesh from multiple views (*silhouettes*).
-It then a sphere which, in the training phase, will get topologically transformed, based on the silhouette images. 
+It then creates a sphere which, in the training phase, will get topologically transformed, based on the silhouette images. 
 Using an optimizer and a loss function, it easily finds out how the mesh needs to be transformed. 
 
 ### Differentiable Rendering
